@@ -81,6 +81,8 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("DELETE /v1/devices/{deviceId}", s.auth(s.handleRemoveDevice))
 	s.mux.HandleFunc("GET /v1/library/changes", s.auth(s.handleChanges))
 	s.mux.HandleFunc("POST /v1/library/records", s.auth(s.handlePushRecords))
+	s.mux.HandleFunc("GET /v1/bookmarks/changes", s.auth(s.handleBookmarkChanges))
+	s.mux.HandleFunc("POST /v1/bookmarks", s.auth(s.handlePushBookmarks))
 	s.mux.HandleFunc("PUT /v1/books/{bookId}/file", s.auth(s.handleUpload))
 	s.mux.HandleFunc("GET /v1/books/{bookId}/file", s.auth(s.handleDownload)) // also HEAD
 	s.mux.HandleFunc("/", s.auth(func(w http.ResponseWriter, r *http.Request, _ store.Device) {

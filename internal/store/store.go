@@ -51,7 +51,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
+	if err := s.migrate(context.Background(), migrations); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -91,12 +91,28 @@ var migrations = []string{
 		rev        INTEGER NOT NULL UNIQUE
 	);
 	INSERT INTO meta(key, value) VALUES ('rev', '0');`,
+
+	// 2: bookmarks. rev comes from the same counter as records.
+	`CREATE TABLE bookmarks (
+		id         TEXT PRIMARY KEY,
+		book_id    TEXT NOT NULL,
+		page       INTEGER NOT NULL,
+		page_count INTEGER NOT NULL,
+		progress   REAL NOT NULL DEFAULT 0,
+		note       TEXT,
+		snippet    TEXT,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		deleted    INTEGER NOT NULL DEFAULT 0,
+		updated_by TEXT NOT NULL,
+		rev        INTEGER NOT NULL UNIQUE
+	);`,
 }
 
 // SchemaVersion is the version this binary migrates to.
 var SchemaVersion = len(migrations)
 
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) migrate(ctx context.Context, migrations []string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

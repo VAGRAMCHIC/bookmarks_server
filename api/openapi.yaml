@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bookmarks Sync API
-  version: "1.0.0"
+  version: "2.0.0"
   summary: Синхронизация библиотеки читалки Bookmarks между устройствами.
   description: |
     Сервер хранит записи о книгах (место чтения, число страниц, название) и,
@@ -52,6 +52,26 @@ info:
     Побеждает версия с большим `updatedAt` (мс, часы клиента). При равенстве
     остаётся сохранённая. Каждая принятая запись и каждая загрузка файла
     получает новый `rev` — номер в монотонной ленте изменений сервера.
+
+    ## Закладки (с версии 2)
+
+    Закладка — отдельная запись с id, который создаёт клиент (32 hex-символа,
+    128 случайных бит), и `bookId` книги. Конфликты — по тем же правилам:
+    побеждает больший `updatedAt`, при равенстве остаётся сохранённая.
+    Удаление — это запись с `deleted: true` (tombstone): сервер хранит её
+    бессрочно, чтобы удаление дошло до всех устройств, и тоже выдаёт в ленте
+    изменений. Удалённую закладку можно вернуть более поздней записью с
+    `deleted: false`.
+
+    `rev` у записей о книгах и у закладок — из одного общего счётчика, но
+    ленты изменений и курсоры у них отдельные. Книга с таким `bookId` на
+    сервере может и не быть: закладки от неё не зависят.
+
+    ## Версии
+
+    `apiVersion` в `/v1/info`: 1 — книги и файлы, 2 — плюс закладки. Клиент
+    версии 2 работает и с сервером версии 1: ответ 404 на методы закладок он
+    понимает как «закладки не поддерживаются» и синхронизирует остальное.
   license:
     name: AGPL-3.0-or-later
     identifier: AGPL-3.0-or-later
@@ -69,6 +89,7 @@ tags:
   - name: devices
   - name: library
   - name: files
+  - name: bookmarks
 
 paths:
   /v1/pair:
@@ -233,6 +254,81 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "413": { $ref: "#/components/responses/TooLarge" }
 
+  /v1/bookmarks/changes:
+    get:
+      tags: [bookmarks]
+      operationId: getBookmarkChanges
+      summary: Закладки, изменённые после курсора (включая удалённые)
+      description: |
+        Возвращает закладки с `rev > since` по возрастанию `rev`, в том числе
+        tombstone (`deleted: true`). Клиент повторяет запрос с
+        `since = cursor`, пока `hasMore = true`. Курсор отдельный от
+        `/v1/library/changes`.
+      parameters:
+        - name: since
+          in: query
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookmarkChangesResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/bookmarks:
+    post:
+      tags: [bookmarks]
+      operationId: pushBookmarks
+      summary: Создать, изменить или удалить закладки
+      description: |
+        Для каждой закладки сервер сохраняет её, если закладки с таким `id`
+        нет или у присланной `updatedAt` строго больше. Удаление — закладка с
+        `deleted: true`. Тогда `rev = ++counter`, `updatedBy` = id
+        устройства. В ответе — то, что лежит на сервере после обработки, по
+        одной закладке на каждую присланную и в том же порядке. Обработка
+        атомарна: при ошибке не сохраняется ничего.
+
+        Если закладка с этим `id` уже есть, но с другим `bookId`, — 409
+        `bookmark_conflict` для всего запроса (так не бывает при случайных id
+        и означает ошибку клиента).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bookmarks]
+              properties:
+                bookmarks:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/BookmarkInput" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bookmarks]
+                properties:
+                  bookmarks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Bookmark" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Закладка с этим id принадлежит другой книге (`bookmark_conflict`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+
   /v1/books/{bookId}/file:
     parameters:
       - $ref: "#/components/parameters/BookId"
@@ -350,7 +446,10 @@ components:
       required: [serverName, apiVersion, deviceId, time]
       properties:
         serverName: { type: string }
-        apiVersion: { type: integer, const: 1 }
+        apiVersion:
+          type: integer
+          enum: [1, 2]
+          description: 2 — сервер поддерживает закладки.
         deviceId: { type: string, description: "Id устройства, сделавшего запрос." }
         time: { type: string, format: date-time }
         maxFileSize: { type: integer, format: int64 }
@@ -413,6 +512,73 @@ components:
           type: integer
           format: int64
           description: rev последней записи в ответе (или since, если записей нет).
+        hasMore: { type: boolean }
+
+    BookmarkId:
+      type: string
+      pattern: "^[0-9a-f]{32}$"
+      description: Создаётся клиентом, 128 случайных бит.
+
+    BookmarkInput:
+      type: object
+      required: [id, bookId, page, pageCount, createdAt, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/BookmarkId" }
+        bookId: { $ref: "#/components/schemas/BookId" }
+        page: { type: integer, minimum: 0, description: Страница с нуля. }
+        pageCount:
+          type: integer
+          minimum: 0
+          description: Сколько страниц было в книге, когда ставили закладку.
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0
+          description: |
+            Доля книги до закладки; по ней закладка переносится, если на
+            другом устройстве число страниц другое.
+        note:
+          type: [string, "null"]
+          maxLength: 1000
+          description: Заметка пользователя.
+        snippet:
+          type: [string, "null"]
+          maxLength: 200
+          description: Начало текста страницы — чтобы узнать закладку в списке.
+        createdAt:
+          type: integer
+          format: int64
+          description: Когда поставлена, мс с начала эпохи (часы клиента).
+        updatedAt:
+          type: integer
+          format: int64
+          description: Когда изменена (заметка, удаление), мс с начала эпохи.
+        deleted:
+          type: boolean
+          default: false
+          description: Закладка удалена (tombstone).
+
+    Bookmark:
+      allOf:
+        - $ref: "#/components/schemas/BookmarkInput"
+        - type: object
+          required: [updatedBy, rev]
+          properties:
+            updatedBy: { type: string, description: deviceId автора этой версии. }
+            rev: { type: integer, format: int64, description: Номер изменения. }
+
+    BookmarkChangesResponse:
+      type: object
+      required: [bookmarks, cursor, hasMore]
+      properties:
+        bookmarks:
+          type: array
+          items: { $ref: "#/components/schemas/Bookmark" }
+        cursor:
+          type: integer
+          format: int64
+          description: rev последней закладки в ответе (или since, если их нет).
         hasMore: { type: boolean }
 
     Error:

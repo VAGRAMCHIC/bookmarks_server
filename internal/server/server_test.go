@@ -264,7 +264,7 @@ func TestPairing(t *testing.T) {
 		expect(t, c.pairWith(strings.ToLower(code)), 200, "")
 		info := c.do("GET", "/v1/info", nil, nil)
 		expect(t, info, 200, "")
-		if m := info.json(t); m["deviceId"] != c.id || m["serverName"] != "Тест" || m["apiVersion"] != 1.0 {
+		if m := info.json(t); m["deviceId"] != c.id || m["serverName"] != "Тест" || m["apiVersion"] != 2.0 {
 			t.Fatalf("info = %v", m)
 		}
 

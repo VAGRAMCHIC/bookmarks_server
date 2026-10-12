@@ -111,7 +111,7 @@ type serverInfo struct {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request, dev store.Device) {
 	writeJSON(w, http.StatusOK, serverInfo{
 		ServerName:  s.cfg.Name,
-		APIVersion:  1,
+		APIVersion:  2,
 		DeviceID:    dev.ID,
 		Time:        s.cfg.Now().UTC().Truncate(time.Millisecond),
 		MaxFileSize: s.cfg.MaxFileSize,
@@ -182,14 +182,16 @@ type changesResponse struct {
 	HasMore bool           `json:"hasMore"`
 }
 
-func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request, _ store.Device) {
+// pageParams parses since and limit of a changes feed. On failure it writes
+// the error response and returns ok = false.
+func pageParams(w http.ResponseWriter, r *http.Request) (since int64, limit int, ok bool) {
 	q := r.URL.Query()
-	since, limit := int64(0), 500
+	since, limit = 0, 500
 	if v := q.Get("since"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 {
 			badRequest(w, "since должен быть целым числом не меньше 0")
-			return
+			return 0, 0, false
 		}
 		since = n
 	}
@@ -197,9 +199,17 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request, _ store.D
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > 1000 {
 			badRequest(w, "limit должен быть от 1 до 1000")
-			return
+			return 0, 0, false
 		}
 		limit = n
+	}
+	return since, limit, true
+}
+
+func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request, _ store.Device) {
+	since, limit, ok := pageParams(w, r)
+	if !ok {
+		return
 	}
 	recs, more, err := s.cfg.Store.Changes(r.Context(), since, limit)
 	if err != nil {
