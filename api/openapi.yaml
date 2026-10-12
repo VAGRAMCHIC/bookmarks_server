@@ -1,0 +1,462 @@
+openapi: 3.1.0
+info:
+  title: Bookmarks Sync API
+  version: "1.0.0"
+  summary: Синхронизация библиотеки читалки Bookmarks между устройствами.
+  description: |
+    Сервер хранит записи о книгах (место чтения, число страниц, название) и,
+    по желанию клиента, сами файлы книг. Протокол подробно описан в
+    docs/sync/README.md.
+
+    ## Транспорт и аутентификация
+
+    * Только HTTPS, TLS 1.3 (TLS 1.2 допустим с ECDHE + AEAD). Порт по
+      умолчанию 8443.
+    * Удостоверяющих центров нет. Сервер и каждое устройство создают
+      собственный ключ ECDSA P-256 и самоподписанный сертификат.
+    * Отпечаток сертификата: SHA-256 от DER, 64 строчные hex-цифры.
+    * Сервер **всегда** запрашивает клиентский сертификат и принимает любой
+      на уровне TLS (в Go: `tls.RequireAnyClientCert`), а проверяет его сам:
+      отпечаток должен принадлежать сопряжённому устройству. Без
+      сертификата или с неизвестным отпечатком доступен только
+      `POST /v1/pair`, остальное отвечает 401.
+    * Клиент не доверяет никаким корневым сертификатам и принимает сервер,
+      только если отпечаток совпал с запомненным при сопряжении.
+
+    ## Сопряжение
+
+    1. Администратор запускает на сервере `pair`; сервер показывает
+       одноразовый код из 16 символов base32 Крокфорда
+       (`XXXX-XXXX-XXXX-XXXX`, 80 бит, живёт 10 минут).
+    2. Клиент подключается с новым сертификатом, видит отпечаток сервера
+       `S` (свой — `C`) и шлёт `clientProof`.
+    3. Сервер проверяет `clientProof` по своему отпечатку и отпечатку
+       клиентского сертификата из TLS, запоминает устройство, гасит код и
+       отвечает `serverProof`.
+    4. Клиент проверяет `serverProof` и запоминает `S`.
+
+    Доказательства:
+    `HMAC-SHA256(key = normalize(code), msg = "bookmarks-pair-v1|<role>|<S>|<C>")`,
+    `role` — `client` или `server`, результат — 64 строчные hex-цифры.
+    `normalize`: в верхний регистр, убрать пробелы и дефисы, O→0, I→1, L→1.
+    Код по сети не передаётся; посредник с поддельным сертификатом не
+    сможет ни подтвердить код серверу, ни подделать ответ клиенту.
+
+    ## Записи и разрешение конфликтов
+
+    Ключ записи — `bookId`, идентификатор по содержимому файла:
+    `"b1_" + hex(SHA-256(ascii(size) + "\n" + first64KiB + last64KiB))`,
+    для файлов до 128 КиБ — `"b1_" + hex(SHA-256(ascii(size) + "\n" + file))`.
+    Один и тот же файл на разных устройствах даёт один `bookId`.
+
+    Побеждает версия с большим `updatedAt` (мс, часы клиента). При равенстве
+    остаётся сохранённая. Каждая принятая запись и каждая загрузка файла
+    получает новый `rev` — номер в монотонной ленте изменений сервера.
+  license:
+    name: AGPL-3.0-or-later
+    identifier: AGPL-3.0-or-later
+servers:
+  - url: https://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8443"
+security:
+  - deviceCertificate: []
+tags:
+  - name: pairing
+  - name: devices
+  - name: library
+  - name: files
+
+paths:
+  /v1/pair:
+    post:
+      tags: [pairing]
+      operationId: pair
+      summary: Сопрячь устройство по одноразовому коду
+      description: |
+        Единственный метод, доступный с неизвестным сертификатом. Сертификат
+        клиента берётся из TLS-рукопожатия, а не из тела запроса. Сервер
+        должен ограничивать попытки (например, 5 в минуту с одного IP и
+        гасить код после 10 неудачных попыток).
+      security:
+        - anyCertificate: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PairRequest" }
+      responses:
+        "200":
+          description: Устройство сопряжено.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PairResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Клиент не предъявил сертификат (`no_client_certificate`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: |
+            Код неверный, истёк или не запрошен (`invalid_pairing_code`).
+            Ответ одинаковый во всех случаях.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Этот сертификат уже сопряжён (`already_paired`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /v1/info:
+    get:
+      tags: [devices]
+      operationId: getInfo
+      summary: Сведения о сервере и проверка сопряжения
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/devices:
+    get:
+      tags: [devices]
+      operationId: listDevices
+      summary: Сопряжённые устройства
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/devices/me:
+    delete:
+      tags: [devices]
+      operationId: unpairSelf
+      summary: Отменить сопряжение этого устройства
+      description: Сервер забывает сертификат устройства. Записи и файлы остаются.
+      responses:
+        "204": { description: Готово. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/devices/{deviceId}:
+    delete:
+      tags: [devices]
+      operationId: removeDevice
+      summary: Отключить другое устройство (например, потерянное)
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Готово. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/library/changes:
+    get:
+      tags: [library]
+      operationId: getChanges
+      summary: Записи, изменённые после курсора
+      description: |
+        Возвращает записи с `rev > since` по возрастанию `rev`. Клиент
+        повторяет запрос с `since = cursor`, пока `hasMore = true`.
+      parameters:
+        - name: since
+          in: query
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChangesResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/library/records:
+    post:
+      tags: [library]
+      operationId: pushRecords
+      summary: Отправить изменённые записи
+      description: |
+        Для каждой записи сервер сохраняет её, если записи с таким `bookId`
+        нет или у присланной `updatedAt` больше. В ответе — то, что лежит на
+        сервере после обработки, в том же порядке (по одной записи на каждую
+        присланную). Обработка атомарна: при ошибке не сохраняется ничего.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/BookRecordInput" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records]
+                properties:
+                  records:
+                    type: array
+                    items: { $ref: "#/components/schemas/BookRecord" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+
+  /v1/books/{bookId}/file:
+    parameters:
+      - $ref: "#/components/parameters/BookId"
+    put:
+      tags: [files]
+      operationId: uploadFile
+      summary: Загрузить файл книги
+      description: |
+        Тело — файл целиком. Сервер пересчитывает `bookId` по содержимому и
+        отклоняет несовпадение (422). Запись с этим `bookId` должна уже
+        существовать (404 иначе). После загрузки у записи `hasFile = true` и
+        новый `rev`. Повторная загрузка того же файла — 204 без изменений.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "204": { description: Файл сохранён. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "411": { description: Нет Content-Length. }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422":
+          description: Содержимое не соответствует bookId (`book_id_mismatch`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "507": { description: На сервере закончилось место (`insufficient_storage`). }
+    get:
+      tags: [files]
+      operationId: downloadFile
+      summary: Скачать файл книги
+      description: Поддерживает заголовок Range для докачки.
+      responses:
+        "200":
+          description: Файл.
+          headers:
+            Content-Length: { schema: { type: integer } }
+            ETag:
+              description: Совпадает с bookId в кавычках.
+              schema: { type: string }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "206": { description: Часть файла по Range. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    head:
+      tags: [files]
+      operationId: headFile
+      summary: Есть ли файл на сервере
+      responses:
+        "200": { description: Есть. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Нет. }
+
+components:
+  securitySchemes:
+    deviceCertificate:
+      type: mutualTLS
+      description: |
+        Самоподписанный сертификат устройства, отпечаток которого сервер
+        запомнил при сопряжении.
+    anyCertificate:
+      type: mutualTLS
+      description: Любой самоподписанный сертификат (только для сопряжения).
+
+  parameters:
+    BookId:
+      name: bookId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/BookId" }
+
+  schemas:
+    BookId:
+      type: string
+      pattern: "^b1_[0-9a-f]{64}$"
+      description: Идентификатор книги по содержимому (см. описание API).
+      examples: ["b1_9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]
+
+    Fingerprint:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+      description: SHA-256 от DER сертификата.
+
+    PairRequest:
+      type: object
+      required: [deviceName, platform, clientProof]
+      properties:
+        deviceName: { type: string, minLength: 1, maxLength: 100 }
+        platform:
+          type: string
+          description: Значение Platform.operatingSystem клиента.
+          examples: [linux, windows, android]
+        clientProof:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: HMAC с ролью `client`.
+
+    PairResponse:
+      type: object
+      required: [deviceId, serverName, serverProof]
+      properties:
+        deviceId: { type: string, description: Постоянный id устройства на сервере. }
+        serverName: { type: string }
+        serverProof:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: HMAC с ролью `server`.
+
+    ServerInfo:
+      type: object
+      required: [serverName, apiVersion, deviceId, time]
+      properties:
+        serverName: { type: string }
+        apiVersion: { type: integer, const: 1 }
+        deviceId: { type: string, description: Id устройства, сделавшего запрос. }
+        time: { type: string, format: date-time }
+        maxFileSize: { type: integer, format: int64 }
+
+    Device:
+      type: object
+      required: [deviceId, deviceName, platform, fingerprint, pairedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: string }
+        platform: { type: string }
+        fingerprint: { $ref: "#/components/schemas/Fingerprint" }
+        pairedAt: { type: string, format: date-time }
+        lastSeenAt: { type: [string, "null"], format: date-time }
+        current: { type: boolean, description: Это устройство сделало запрос. }
+
+    BookRecordInput:
+      type: object
+      required: [bookId, fileName, fileSize, updatedAt]
+      properties:
+        bookId: { $ref: "#/components/schemas/BookId" }
+        fileName:
+          type: string
+          maxLength: 255
+          description: Имя файла на устройстве-источнике, без пути.
+        fileSize: { type: integer, format: int64, minimum: 0 }
+        title: { type: [string, "null"], maxLength: 1000 }
+        lastPage: { type: integer, minimum: 0, default: 0, description: С нуля. }
+        pageCount: { type: integer, minimum: 0, default: 0 }
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0
+          description: Доля прочитанного; по ней переносится место при другом числе страниц.
+        updatedAt:
+          type: integer
+          format: int64
+          description: Время изменения места чтения, мс с начала эпохи (часы клиента).
+        deleted: { type: boolean, default: false }
+
+    BookRecord:
+      allOf:
+        - $ref: "#/components/schemas/BookRecordInput"
+        - type: object
+          required: [hasFile, updatedBy, rev]
+          properties:
+            hasFile: { type: boolean, description: Файл книги есть на сервере. }
+            updatedBy: { type: string, description: deviceId автора этой версии. }
+            rev: { type: integer, format: int64, description: Номер изменения. }
+
+    ChangesResponse:
+      type: object
+      required: [records, cursor, hasMore]
+      properties:
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/BookRecord" }
+        cursor:
+          type: integer
+          format: int64
+          description: rev последней записи в ответе (или since, если записей нет).
+        hasMore: { type: boolean }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Машинный код, например invalid_pairing_code.
+            message:
+              type: string
+              description: Понятное пользователю сообщение (на русском).
+
+  responses:
+    BadRequest:
+      description: Неверный запрос (`bad_request`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: |
+        Нет сертификата или устройство не сопряжено (`unknown_device`).
+        Клиент, получив 401, забывает сервер и предлагает сопрячь заново.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Не найдено (`not_found`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: Слишком большой запрос или файл (`too_large`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Слишком много попыток (`rate_limited`), см. Retry-After.
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
