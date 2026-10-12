@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Copy to /etc/systemd/system/, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bookmarks-server
+
+[Unit]
+Description=Bookmarks sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/bookmarks-server serve --data /var/lib/bookmarks-server --listen :8443 --name "Дом"
+DynamicUser=yes
+# A fixed name keeps the same user for `systemd-run ... pair` (see README).
+User=bookmarks-server
+StateDirectory=bookmarks-server
+StateDirectoryMode=0700
+Restart=on-failure
+TimeoutStopSec=15
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

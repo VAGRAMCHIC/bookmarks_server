@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+services:
+  bookmarks:
+    build: .
+    image: bookmarks-server
+    restart: unless-stopped
+    command: ["serve", "--name", "Дом"]
+    ports:
+      - "8443:8443"
+    volumes:
+      - bookmarks-data:/data
+
+volumes:
+  bookmarks-data:
