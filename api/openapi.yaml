@@ -351,7 +351,7 @@ components:
       properties:
         serverName: { type: string }
         apiVersion: { type: integer, const: 1 }
-        deviceId: { type: string, description: Id устройства, сделавшего запрос. }
+        deviceId: { type: string, description: "Id устройства, сделавшего запрос." }
         time: { type: string, format: date-time }
         maxFileSize: { type: integer, format: int64 }
 
