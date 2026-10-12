@@ -10,6 +10,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# How many devices may be paired; 0 means no limit.
+Environment=BOOKMARKS_MAX_DEVICES=10
 ExecStart=/usr/local/bin/bookmarks-server serve --data /var/lib/bookmarks-server --listen :8443 --name "Дом"
 DynamicUser=yes
 # A fixed name keeps the same user for `systemd-run ... pair` (see README).

@@ -222,6 +222,22 @@ func TestPairing(t *testing.T) {
 		t.Fatalf("last seen not updated %v", got.LastSeenAt)
 	}
 
+	// The device limit refuses a correct code without burning it.
+		code, _ = pairing.NewCode()
+	s.SetPairingCode(ctx, code, now.Add(10*time.Minute))
+	limited := req(code, strings.Repeat("55", 32), now)
+	limited.MaxDevices = 1
+	if _, _, err := s.Pair(ctx, limited); !errors.Is(err, ErrDeviceLimit) {
+		t.Fatalf("limit: %v", err)
+	}
+	limited.MaxDevices = 2
+	if _, _, err := s.Pair(ctx, limited); err != nil {
+		t.Fatalf("code burnt by the limit: %v", err)
+	}
+	if n, err := s.CountDevices(ctx); err != nil || n != 2 {
+		t.Fatalf("CountDevices = %d, %v", n, err)
+	}
+
 	if err := s.RemoveDevice(ctx, d.ID); err != nil {
 		t.Fatal(err)
 	}

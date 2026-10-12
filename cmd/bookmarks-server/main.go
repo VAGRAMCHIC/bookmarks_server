@@ -32,14 +32,15 @@ import (
 const usage = `bookmarks-server — сервер синхронизации читалки Bookmarks
 
 Команды:
-  serve       [--data DIR] [--listen :8443] [--name "Дом"] [--max-file-size 500M]
-  pair        [--data DIR] [--ttl 10m]
+  serve       [--data DIR] [--listen :8443] [--name "Дом"] [--max-file-size 500M] [--max-devices N]
+  pair        [--data DIR] [--ttl 10m] [--max-devices N]
   devices     [--data DIR]
   remove      [--data DIR] DEVICE_ID
   fingerprint [--data DIR]
 
 Каталог данных по умолчанию: $BOOKMARKS_DATA, иначе
 $XDG_DATA_HOME/bookmarks-server (~/.local/share/bookmarks-server).
+Ограничение числа устройств по умолчанию: $BOOKMARKS_MAX_DEVICES, иначе нет.
 `
 
 func main() {
@@ -67,6 +68,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		listen := flags.String("listen", ":8443", "адрес и порт")
 		name := flags.String("name", "", "имя сервера (по умолчанию из сертификата или имя хоста)")
 		maxSize := flags.String("max-file-size", "500M", "наибольший размер файла книги")
+		maxDevices := maxDevicesFlag(flags)
 		if err := flags.Parse(args); err != nil {
 			return err
 		}
@@ -74,13 +76,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("--max-file-size: %w", err)
 		}
-		return serve(ctx, *data, *listen, *name, size, stdout, stderr)
+		if *maxDevices < 0 {
+			return errors.New("--max-devices не может быть отрицательным")
+		}
+		return serve(ctx, *data, *listen, *name, size, *maxDevices, stdout, stderr)
 	case "pair":
 		ttl := flags.Duration("ttl", 10*time.Minute, "сколько действует код")
+		maxDevices := maxDevicesFlag(flags)
 		if err := flags.Parse(args); err != nil {
 			return err
 		}
-		return pair(ctx, *data, *ttl, stdout)
+		return pair(ctx, *data, *ttl, *maxDevices, stdout)
 	case "devices":
 		if err := flags.Parse(args); err != nil {
 			return err
@@ -114,6 +120,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stderr, usage)
 		return fmt.Errorf("неизвестная команда %q", cmd)
 	}
+}
+
+// maxDevicesFlag defines --max-devices, defaulting to $BOOKMARKS_MAX_DEVICES
+// so that serve and pair see the same limit from one environment.
+func maxDevicesFlag(flags *flag.FlagSet) *int {
+	def := 0
+	if v := os.Getenv("BOOKMARKS_MAX_DEVICES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			def = n
+		}
+	}
+	return flags.Int("max-devices", def, "наибольшее число сопряжённых устройств, 0 — без ограничения ($BOOKMARKS_MAX_DEVICES)")
 }
 
 func defaultDataDir() string {
@@ -173,7 +191,7 @@ func parseSize(s string) (int64, error) {
 	return n * mul, nil
 }
 
-func serve(ctx context.Context, dir, listen, name string, maxSize int64, stdout, stderr io.Writer) error {
+func serve(ctx context.Context, dir, listen, name string, maxSize int64, maxDevices int, stdout, stderr io.Writer) error {
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	st, err := openStore(dir)
 	if err != nil {
@@ -212,6 +230,7 @@ func serve(ctx context.Context, dir, listen, name string, maxSize int64, stdout,
 		Name:              name,
 		ServerFingerprint: fp,
 		MaxFileSize:       maxSize,
+		MaxDevices:        maxDevices,
 		Logger:            log,
 	})
 	srv := server.HTTPServer(listen, h, server.TLSConfig(cert), log)
@@ -238,7 +257,7 @@ func serve(ctx context.Context, dir, listen, name string, maxSize int64, stdout,
 	return nil
 }
 
-func pair(ctx context.Context, dir string, ttl time.Duration, stdout io.Writer) error {
+func pair(ctx context.Context, dir string, ttl time.Duration, maxDevices int, stdout io.Writer) error {
 	if ttl <= 0 {
 		return errors.New("--ttl должен быть больше нуля")
 	}
@@ -254,6 +273,15 @@ func pair(ctx context.Context, dir string, ttl time.Duration, stdout io.Writer) 
 		return err
 	}
 	defer st.Close()
+	if maxDevices > 0 {
+		n, err := st.CountDevices(ctx)
+		if err != nil {
+			return err
+		}
+		if n >= maxDevices {
+			return fmt.Errorf("уже сопряжено %d из %d разрешённых устройств: отключите лишнее (bookmarks-server devices, remove) или увеличьте --max-devices", n, maxDevices)
+		}
+	}
 	code, err := pairing.NewCode()
 	if err != nil {
 		return err

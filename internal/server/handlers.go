@@ -69,10 +69,17 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		ClientFingerprint: clientFP,
 		ClientProof:       *req.ClientProof,
 		Now:               s.cfg.Now(),
+		MaxDevices:        s.cfg.MaxDevices,
 	})
 	switch {
 	case errors.Is(err, store.ErrAlreadyPaired):
 		writeError(w, http.StatusConflict, "already_paired", "Это устройство уже сопряжено с сервером")
+		return
+	case errors.Is(err, store.ErrDeviceLimit):
+		s.log.Warn("pairing refused: device limit", "max_devices", s.cfg.MaxDevices)
+		writeError(w, http.StatusForbidden, "device_limit_reached",
+			"К серверу уже подключено наибольшее разрешённое число устройств ("+strconv.Itoa(s.cfg.MaxDevices)+
+				"). Отключите ненужное устройство и попробуйте снова с тем же кодом.")
 		return
 	case errors.Is(err, store.ErrInvalidCode):
 		s.log.Warn("pairing failed", "remote", remoteIP(r))

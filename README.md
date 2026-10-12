@@ -35,6 +35,7 @@ bookmarks-server serve --name "Дом"
 | `--listen` | `:8443` | адрес и порт |
 | `--name` | имя из сертификата, при первом запуске — имя компьютера | как сервер называется в приложении |
 | `--max-file-size` | `500M` | наибольший размер файла книги (`K`, `M`, `G`) |
+| `--max-devices` | `$BOOKMARKS_MAX_DEVICES`, иначе `0` | сколько устройств можно сопрячь, `0` — без ограничения |
 
 Сервер останавливается по Ctrl+C или SIGTERM и даёт текущим запросам до
 10 секунд на завершение.
@@ -50,6 +51,20 @@ bookmarks-server fingerprint        # отпечаток сертификата 
 
 Все они работают с тем же каталогом данных, что и `serve`, и их можно
 запускать, пока сервер работает.
+
+## Ограничение числа устройств
+
+Число сопряжённых устройств ограничивается флагом `--max-devices` или
+переменной окружения `BOOKMARKS_MAX_DEVICES` (флаг важнее). В
+`docker-compose.yml` и в юните systemd это `BOOKMARKS_MAX_DEVICES=10`:
+поменяйте число и перезапустите сервис (`docker compose up -d` или
+`sudo systemctl daemon-reload && sudo systemctl restart bookmarks-server`).
+
+Когда предел достигнут, `pair` не выдаёт новый код, а устройство с уже
+выданным кодом получает ошибку «наибольшее разрешённое число устройств».
+Код при этом не сгорает: отключите ненужное устройство и повторите
+сопряжение с тем же кодом. Уменьшение предела никого не отключает, оно
+только запрещает новые сопряжения.
 
 ## Сопряжение устройства
 
@@ -147,7 +162,7 @@ journalctl -u bookmarks-server -f
 
 ```sh
 sudo systemd-run --pty --wait --collect -p DynamicUser=yes -p User=bookmarks-server \
-  -p StateDirectory=bookmarks-server \
+  -p StateDirectory=bookmarks-server -p Environment=BOOKMARKS_MAX_DEVICES=10 \
   /usr/local/bin/bookmarks-server pair --data /var/lib/bookmarks-server
 ```
 

@@ -313,6 +313,18 @@ func TestPairing(t *testing.T) {
 	})
 }
 
+func TestDeviceLimit(t *testing.T) {
+	e := newEnv(t, func(c *server.Config) { c.MaxDevices = 2 })
+	a := e.paired()
+	e.paired()
+	code := e.newCode(10 * time.Minute)
+	c := e.newClient()
+	expect(t, c.pairWith(code), 403, "device_limit_reached")
+	// After a device leaves, the same code works.
+	expect(t, a.do("DELETE", "/v1/devices/me", nil, nil), 204, "")
+	expect(t, c.pairWith(code), 200, "")
+}
+
 func TestPairRateLimit(t *testing.T) {
 	e := newEnv(t, func(c *server.Config) { c.PairLimit = 0 }) // default: 5 per minute
 	c := e.newClient()

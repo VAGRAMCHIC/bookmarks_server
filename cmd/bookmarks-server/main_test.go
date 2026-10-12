@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vagramchic/bookmarks-server/internal/pairing"
+	"github.com/vagramchic/bookmarks-server/internal/store"
 )
 
 func runCmd(t *testing.T, args ...string) (string, error) {
@@ -79,6 +82,27 @@ func TestCommands(t *testing.T) {
 	if out, err := runCmd(t, "devices", "--data", dir); err != nil || !strings.Contains(out, "нет") {
 		t.Fatalf("devices: %q %v", out, err)
 	}
+	// With a full device list pair refuses to issue a code.
+	st, err := openStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _ := pairing.NewCode()
+	st.SetPairingCode(context.Background(), code, time.Now().Add(time.Minute))
+	_, _, err = st.Pair(context.Background(), store.PairRequest{Name: "x", Platform: "linux",
+		ServerFingerprint: "s", ClientFingerprint: "c", ClientProof: pairing.ClientProof(code, "s", "c"), Now: time.Now()})
+	st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BOOKMARKS_MAX_DEVICES", "1")
+	if out, err := runCmd(t, "pair", "--data", dir); err == nil || !strings.Contains(err.Error(), "1 из 1") {
+		t.Fatalf("pair over the limit: %q %v", out, err)
+	}
+	if _, err := runCmd(t, "pair", "--data", dir, "--max-devices", "2"); err != nil {
+		t.Fatalf("pair under the limit: %v", err)
+	}
+
 	if _, err := runCmd(t, "remove", "--data", dir, "nope"); err == nil {
 		t.Fatal("remove of unknown device succeeded")
 	}

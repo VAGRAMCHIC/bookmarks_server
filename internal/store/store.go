@@ -30,6 +30,7 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrInvalidCode   = errors.New("invalid pairing code")
 	ErrAlreadyPaired = errors.New("already paired")
+	ErrDeviceLimit   = errors.New("device limit reached")
 )
 
 // Store is a handle to the database. It is safe for concurrent use.
@@ -198,6 +199,17 @@ func (s *Store) Devices(ctx context.Context) ([]Device, error) {
 	return out, rows.Err()
 }
 
+func countDevices(ctx context.Context, q querier) (int, error) {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices`).Scan(&n)
+	return n, err
+}
+
+// CountDevices returns the number of paired devices.
+func (s *Store) CountDevices(ctx context.Context) (int, error) {
+	return countDevices(ctx, s.db)
+}
+
 // RemoveDevice forgets a device. Its records and files stay.
 func (s *Store) RemoveDevice(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE id = ?`, id)
@@ -254,12 +266,15 @@ type PairRequest struct {
 	ClientFingerprint string
 	ClientProof       string
 	Now               time.Time
+	MaxDevices        int // 0 means no limit
 }
 
 // Pair checks the client's proof against the current code. On success it
 // creates the device, burns the code and returns the device and the code
 // (the HMAC key for the server proof). A wrong proof counts as a failed
-// attempt; after MaxFailedAttempts the code is burnt.
+// attempt; after MaxFailedAttempts the code is burnt. If MaxDevices devices
+// are already paired, a correct proof gets ErrDeviceLimit and the code stays
+// valid, so it can be used once a device is removed.
 func (s *Store) Pair(ctx context.Context, req PairRequest) (Device, string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -308,6 +323,16 @@ func (s *Store) Pair(ctx context.Context, req PairRequest) (Device, string, erro
 			return Device{}, "", err
 		}
 		return Device{}, "", ErrInvalidCode
+	}
+
+	if req.MaxDevices > 0 {
+		n, err := countDevices(ctx, tx)
+		if err != nil {
+			return Device{}, "", err
+		}
+		if n >= req.MaxDevices {
+			return Device{}, "", ErrDeviceLimit
+		}
 	}
 
 	id, err := NewDeviceID()

@@ -6,6 +6,10 @@ services:
     image: bookmarks-server
     restart: unless-stopped
     command: ["serve", "--name", "Дом"]
+    environment:
+      # Сколько устройств можно сопрячь; 0 — без ограничения.
+      # Действует и на `docker compose exec bookmarks bookmarks-server pair`.
+      BOOKMARKS_MAX_DEVICES: "10"
     ports:
       - "8443:8443"
     volumes:

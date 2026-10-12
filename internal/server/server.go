@@ -31,6 +31,7 @@ type Config struct {
 	Name              string // shown to clients as serverName
 	ServerFingerprint string // fingerprint of the server's own certificate
 	MaxFileSize       int64
+	MaxDevices        int // paired devices allowed; 0 means no limit
 	Logger            *slog.Logger
 	Now               func() time.Time // for tests; time.Now by default
 
